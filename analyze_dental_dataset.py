@@ -120,7 +120,7 @@ class DentalDatasetAnalyzer:
 
 if __name__ == "__main__":
     # Initialize analyzer
-    data_dir = r"c:\Users\aniru\Downloads\GIT REPO\ToothNumber_TaskDataset"
+    data_dir = r"C:\Users\aniru\Music\Project 1\ToothNumber_TaskDataset"
     analyzer = DentalDatasetAnalyzer(data_dir)
     
     # Get basic stats

@@ -66,5 +66,5 @@ def split_dataset(data_dir, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, se
     print(f"Test: {len(splits_files['test'])} images")
 
 if __name__ == "__main__":
-    data_dir = r"C:\Users\aniru\Downloads\Project 1"
+    data_dir = r"C:\Users\aniru\Music\Project 1\ToothNumber_TaskDataset"
     split_dataset(data_dir, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15)

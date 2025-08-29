@@ -121,7 +121,7 @@ def export_model(model, format='onnx'):
 
 if __name__ == "__main__":
     # Set up paths
-    data_dir = Path(r"C:\Users\aniru\Downloads\Project 1")
+    data_dir = Path(r"C:\Users\aniru\Music\Project 1\ToothNumber_TaskDataset")
     
     # Create YAML config
     print("Creating YAML configuration...")

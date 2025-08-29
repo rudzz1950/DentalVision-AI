@@ -1,14 +1,15 @@
 
 # 🦷 Dental Teeth Detection with YOLOv8
 
-This project implements a robust tooth detection and numbering system using YOLOv8 to identify, localize, and number individual teeth in dental radiographs with high accuracy.
+This project implements a robust tooth detection and numbering system using YOLOv8 to identify, localize, and number individual teeth in dental radiographs according to the FDI World Dental Federation numbering system.
 
 ## 📋 Project Overview
 
-- **Model**: YOLOv8 (You Only Look Once version 8)
-- **Input**: Dental panoramic or periapical radiographs
-- **Output**: Bounding boxes around detected teeth with corresponding tooth numbers
+- **Model**: YOLOv8m (You Only Look Once version 8 Medium)
+- **Input**: Dental panoramic radiographs (640x640 pixels)
+- **Output**: Bounding boxes with FDI tooth numbers (11-18, 21-28, 31-38, 41-48)
 - **Use Case**: Dental record management, treatment planning, and educational purposes
+- **Dataset**: ~500 annotated dental panoramic images
 
 ## 📂 Project Structure
 
@@ -46,8 +47,24 @@ This project implements a robust tooth detection and numbering system using YOLO
 
 1. Clone this repository:
    ```bash
-   git clone https://github.com/yourusername/dental-teeth-detection.git
-   cd dental-teeth-detection
+   git clone https://github.com/yourusername/DentalVision-AI.git
+   cd DentalVision-AI
+   ```
+
+2. Create and activate a virtual environment:
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
+
+3. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+   
+   If requirements.txt doesn't exist, install the required packages manually:
+   ```bash
+   pip install ultralytics scikit-learn matplotlib numpy opencv-python
    ```
 
 2. Create and activate a virtual environment (recommended):
@@ -174,6 +191,67 @@ python inference.py \
 | Original | Predicted |
 |----------|-----------|
 | ![Sample 1](sample_vis_e962bd4f-20240909-110814899.png) | ![Sample 2](sample_vis_748a54d0-20240820-104104646.png) |
+
+## 📊 Dataset Analysis
+
+Run the dataset analysis script to visualize class distribution and other statistics:
+
+```bash
+python analyze_dataset.py
+```
+
+This will generate:
+- Class distribution plots
+- Dataset statistics
+- Sample visualizations
+
+## 🏋️ Training
+
+To train the model with default settings:
+
+```bash
+python train_detection_model.py
+```
+
+### Training Configuration
+
+Key training parameters can be modified in `train_detection_model.py`:
+- Image size: 640x640
+- Batch size: Auto-scaled based on GPU memory
+- Epochs: 200
+- Augmentations:
+  - Mosaic (100%)
+  - MixUp (10%)
+  - Random flip (50%)
+  - HSV augmentation
+  - Random erase (40%)
+  - And more...
+
+## 🔍 Evaluation
+
+Evaluate the trained model on the test set:
+
+```bash
+python train_detection_model.py --task test --weights runs/train/exp/weights/best.pt
+```
+
+## 🏗️ Model Architecture
+
+The model uses YOLOv8m with the following specifications:
+- **Backbone**: CSPDarknet
+- **Neck**: PANet
+- **Head**: YOLOv8 Detection Head
+- **Input Size**: 640x640 pixels
+- **Augmentations**: Mosaic, MixUp, Random Erasing, etc.
+
+## 📊 Performance Metrics
+
+Key metrics are logged during training and evaluation:
+- mAP@0.5
+- mAP@0.5:0.95
+- Precision
+- Recall
+- F1-Score
 
 ## 📚 Dataset
 

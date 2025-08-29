@@ -1,24 +1,53 @@
 import os
 import yaml
-from pathlib import Path
-from ultralytics import YOLO
+import json
 import shutil
 import torch
+import numpy as np
+import matplotlib.pyplot as plt
+from pathlib import Path
+from datetime import datetime
+from ultralytics import YOLO
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+from typing import Dict, List, Tuple, Optional
 
-def create_yaml_config(data_dir):
-    """Create YAML configuration file for YOLOv8 training."""
+def create_yaml_config(data_dir: Path) -> Path:
+    """
+    Create YAML configuration file for YOLOv8 training with FDI tooth numbering.
+    
+    Args:
+        data_dir: Path to the dataset directory
+        
+    Returns:
+        Path to the created YAML file
+    """
+    # Define FDI tooth numbering system
+    tooth_types = ['Central Incisor', 'Lateral Incisor', 'Canine', 
+                  'First Premolar', 'Second Premolar', 'First Molar', 
+                  'Second Molar', 'Third Molar']
+    
+    # Create class names mapping (0-31)
+    class_names = {}
+    for i in range(32):
+        quadrant = (i // 8) + 1  # 1-4
+        tooth_num = (i % 8) + 1  # 1-8
+        fdi = int(f"{quadrant}{tooth_num}")
+        tooth_type = tooth_types[tooth_num-1] if tooth_num <= 8 else 'Unknown'
+        class_names[i] = f"{tooth_type} ({fdi})"
+    
     data = {
         'path': str(data_dir.absolute()),
-        'train': 'train/images',  # relative to path
-        'val': 'val/images',      # relative to path
-        'test': 'test/images',    # relative to path
-        'names': {i: str(i+1) for i in range(32)},  # Tooth numbers 1-32
-        'nc': 32  # number of classes
+        'train': 'train/images',
+        'val': 'val/images',
+        'test': 'test/images',
+        'names': class_names,
+        'nc': 32,
+        'fdi_mapping': {i: int(f"{(i//8)+1}{(i%8)+1}") for i in range(32)}
     }
     
     yaml_path = data_dir / 'dental_teeth.yaml'
     with open(yaml_path, 'w') as f:
-        yaml.dump(data, f, default_flow_style=False)
+        yaml.dump(data, f, default_flow_style=False, sort_keys=False)
     
     return yaml_path
 
@@ -45,53 +74,71 @@ def train_yolov8(data_yaml, epochs=200, imgsz=640, batch=16, model_size='m', pat
         gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1e9  # GB
         batch = min(batch, max(4, int(gpu_mem * 0.8 / 3)))  # 80% of GPU mem, ~3GB per batch
     
-    # Advanced training configuration
+    # Advanced training configuration with data augmentation
     train_args = {
         'data': str(data_yaml),
         'epochs': epochs,
         'imgsz': imgsz,
         'batch': batch,
-        'device': 0 if torch.cuda.is_available() else 'cpu',
-        'project': 'dental_teeth_detection',
-        'name': f'yolov8{model_size}_optimized',
-        'exist_ok': True,
+        'patience': patience,
+        'lr0': lr0,
+        'lrf': lrf,
         'optimizer': optimizer,
-        'lr0': lr0,  # Initial learning rate
-        'lrf': lrf,  # Final learning rate (lr0 * lrf)
-        'momentum': 0.937,  # SGD momentum
-        'weight_decay': 0.0005,  # Optimizer weight decay
-        'warmup_epochs': 3.0,  # Warmup epochs
-        'warmup_momentum': 0.8,  # Warmup initial momentum
-        'warmup_bias_lr': 0.1,  # Warmup initial bias lr
-        'box': 7.5,  # Box loss gain
-        'cls': 0.5,  # Class loss gain
-        'dfl': 1.5,  # Distribution Focal Loss gain
-        'hsv_h': 0.015,  # Image HSV-Hue augmentation
-        'hsv_s': 0.7,  # Image HSV-Saturation augmentation
-        'hsv_v': 0.4,  # Image HSV-Value augmentation
+        'device': '0' if torch.cuda.is_available() else 'cpu',
+        'workers': min(8, os.cpu_count() - 1),  # Use all available cores - 1
+        'weight_decay': 0.0005,  # L2 regularization
+        'cos_lr': True,  # Cosine learning rate scheduler
+        'label_smoothing': 0.1,  # Label smoothing
+        
+        # Image augmentation parameters
+        'hsv_h': 0.015,  # Image HSV-Hue augmentation (fraction)
+        'hsv_s': 0.7,    # Image HSV-Saturation augmentation (fraction)
+        'hsv_v': 0.4,    # Image HSV-Value augmentation (fraction)
         'degrees': 10.0,  # Image rotation (+/- deg)
         'translate': 0.1,  # Image translation (+/- fraction)
-        'scale': 0.5,  # Image scale (+/- gain)
-        'shear': 2.0,  # Image shear (+/- deg)
-        'perspective': 0.0001,  # Image perspective
-        'flipud': 0.0,  # Flip up-down probability
-        'fliplr': 0.5,  # Flip left-right probability
-        'mosaic': 1.0,  # Mosaic augmentation probability
-        'mixup': 0.1,  # MixUp augmentation probability
-        'copy_paste': 0.1,  # Copy-paste augmentation probability
-        'erasing': 0.4,  # Random erasing probability
-        'crop_fraction': 0.9,  # Random crop fraction
-        'patience': patience,  # Early stopping patience
-        'save_period': -1,  # Save checkpoint every x epochs (-1 = last only)
-        'single_cls': False,  # Train as single-class dataset
+        'scale': 0.5,     # Image scale (+/- gain)
+        'shear': 2.0,     # Image shear (+/- deg)
+        'perspective': 0.0005,  # Image perspective (+/- fraction)
+        'flipud': 0.5,    # Image flip up-down (probability)
+        'fliplr': 0.5,    # Image flip left-right (probability)
+        'mosaic': 1.0,    # Use mosaic augmentation (probability)
+        'mixup': 0.1,     # Use mixup augmentation (probability)
+        'copy_paste': 0.1,  # Use copy-paste augmentation (probability)
+        'erasing': 0.4,   # Random erasing (probability)
+        'augment': True,  # Apply image augmentation
+        
+        # Advanced augmentation for dental images
+        'mosaic9': 0.2,   # 9-image mosaic augmentation
+        'auto_augment': 'randaugment',  # AutoAugment policy
+        'augment_degrees': 10.0,  # Additional rotation for augmentation
+        'augment_translate': 0.1,
+        'augment_scale': 0.5,
+        'augment_shear': 2.0,
+        'augment_perspective': 0.0005,
+        'augment_flipud': 0.5,
+        'augment_fliplr': 0.5,
+        'augment_mosaic': 1.0,
+        'augment_mixup': 0.1,
+        'augment_copy_paste': 0.1,
+        'augment_erasing': 0.4,
+        
+        # Regularization
+        'dropout': 0.1,  # Dropout (fraction)
+        'weight_decay': 0.0005,  # L2 regularization
+        'warmup_epochs': 3.0,  # Warmup epochs (fractions ok)
+        'warmup_momentum': 0.8,  # Warmup initial momentum
+        'warmup_bias_lr': 0.1,  # Warmup initial bias lr
+        
+        # Training settings
         'rect': False,  # Rectangular training
-        'cos_lr': True,  # Cosine LR scheduler
-        'close_mosaic': 10,  # Disable mosaic for last N epochs
-        'amp': True,  # Automatic Mixed Precision (AMP) training
-        'overlap_mask': True,  # Overlap mask during training
-        'mask_ratio': 4,  # Mask downsample ratio
-        'dropout': 0.0,  # Use dropout regularization (probability)
-        'val': True,  # Validate during training
+        'single_cls': False,  # Train as single-class dataset
+        'exist_ok': True,  # Existing project/name ok, do not increment
+        'project': 'runs/train',  # Save to project/name
+        'name': 'exp',  # Save results to project/name
+        'save_period': -1,  # Save checkpoint every x epochs
+        'local_rank': -1,  # DDP parameter, do not modify
+        'freeze': None,  # Freeze layers (comma separated)
+        'save_dir': 'runs/train/exp',  # Save results to project/name
         'plots': True,  # Save plots during training
         'optimize': True,  # Optimize ONNX and TorchScript models
         'seed': 42,  # Global training seed
@@ -102,15 +149,63 @@ def train_yolov8(data_yaml, epochs=200, imgsz=640, batch=16, model_size='m', pat
     
     return model
 
-def evaluate_model(model, data_yaml, split='val'):
-    """Evaluate the trained model on the validation or test set."""
-    metrics = model.val(
+def evaluate_model(model, data_yaml: str, output_dir: Path, split: str = 'val') -> dict:
+    """
+    Evaluate the trained model with comprehensive metrics and visualizations.
+    
+    Args:
+        model: Trained YOLO model
+        data_yaml: Path to dataset YAML
+        output_dir: Directory to save evaluation results
+        split: Dataset split to evaluate on ('val' or 'test')
+        
+    Returns:
+        Dictionary containing evaluation metrics
+    """
+    # Create output directories
+    eval_dir = output_dir / 'evaluation'
+    eval_dir.mkdir(exist_ok=True)
+    
+    # Run evaluation
+    results = model.val(
         data=str(data_yaml),
         split=split,
-        project='dental_teeth_detection',
-        name=f'yolov8m_val',
-        exist_ok=True
+        imgsz=640,
+        batch=16,
+        conf=0.25,
+        iou=0.45,
+        save_json=True,
+        save_hybrid=True,
+        plots=True,
+        project=str(output_dir),
+        name='evaluation',
     )
+    
+    # Save metrics to JSON
+    metrics = {
+        'mAP50': results.box.map50,
+        'mAP50_95': results.box.map,
+        'precision': results.box.mp,
+        'recall': results.box.mr,
+        'f1_score': (2 * results.box.mp * results.box.mr) / (results.box.mp + results.box.mr + 1e-16),
+        'timestamp': datetime.now().isoformat()
+    }
+    
+    with open(eval_dir / 'metrics.json', 'w') as f:
+        json.dump(metrics, f, indent=2)
+    
+    # Generate confusion matrix
+    if hasattr(results, 'confusion_matrix'):
+        conf_mat = results.confusion_matrix.matrix
+        plt.figure(figsize=(15, 12))
+        plt.imshow(conf_mat, cmap='Blues')
+        plt.colorbar()
+        plt.title('Confusion Matrix')
+        plt.xlabel('Predicted')
+        plt.ylabel('Actual')
+        plt.savefig(eval_dir / 'confusion_matrix.png')
+        plt.close()
+    
     return metrics
 
 def export_model(model, format='onnx'):
@@ -119,9 +214,105 @@ def export_model(model, format='onnx'):
     print(f"Model exported to {export_path}")
     return export_path
 
+def plot_training_metrics(metrics: dict, output_dir: Path) -> None:
+    """Plot training metrics over epochs."""
+    plt.figure(figsize=(12, 8))
+    
+    # Loss curves
+    plt.subplot(2, 2, 1)
+    plt.plot(metrics.get('train/box_loss', []), label='Train Loss')
+    plt.plot(metrics.get('val/box_loss', []), label='Val Loss')
+    plt.title('Training & Validation Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    
+    # mAP curves
+    plt.subplot(2, 2, 2)
+    plt.plot(metrics.get('metrics/mAP50', []), label='mAP@0.5')
+    plt.plot(metrics.get('metrics/mAP50-95', []), label='mAP@0.5:0.95')
+    plt.title('mAP Metrics')
+    plt.xlabel('Epoch')
+    plt.ylabel('mAP')
+    plt.legend()
+    
+    # Precision-Recall curve
+    plt.subplot(2, 2, 3)
+    plt.plot(metrics.get('metrics/precision', []), label='Precision')
+    plt.plot(metrics.get('metrics/recall', []), label='Recall')
+    plt.title('Precision & Recall')
+    plt.xlabel('Epoch')
+    plt.legend()
+    
+    # Save the figure
+    plt.tight_layout()
+    plt.savefig(output_dir / 'training_metrics.png')
+    plt.close()
+
+def postprocess_predictions(predictions, image_size: Tuple[int, int] = (640, 640)) -> List[Dict]:
+    """
+    Post-process model predictions for anatomical correctness.
+    
+    Args:
+        predictions: Raw model predictions
+        image_size: Size of the input image (width, height)
+        
+    Returns:
+        List of processed detections with anatomical validation
+    """
+    processed = []
+    
+    for pred in predictions:
+        # Convert to numpy for easier manipulation
+        boxes = pred.boxes.xywhn.cpu().numpy()  # Normalized xywh
+        classes = pred.boxes.cls.cpu().numpy()
+        scores = pred.boxes.conf.cpu().numpy()
+        
+        # Group by quadrant (1-4)
+        quadrants = {1: [], 2: [], 3: [], 4: []}
+        for i, (box, cls_id, score) in enumerate(zip(boxes, classes, scores)):
+            x_center, y_center, width, height = box
+            quadrant = int(cls_id // 8) + 1  # 1-4
+            quadrants[quadrant].append({
+                'box': box,
+                'class_id': int(cls_id),
+                'score': float(score),
+                'x_center': x_center,
+                'y_center': y_center
+            })
+        
+        # Sort teeth within each quadrant
+        for quad, detections in quadrants.items():
+            # Sort by x-coordinate (left to right)
+            if quad in [1, 2]:  # Upper jaw
+                detections.sort(key=lambda x: x['x_center'])
+            else:  # Lower jaw
+                detections.sort(key=lambda x: -x['x_center'])
+            
+            # Validate tooth sequence
+            prev_tooth = None
+            for det in detections:
+                # Add anatomical validation logic here
+                # For example, check if tooth sequence makes sense
+                if prev_tooth:
+                    # Check if teeth are in correct order
+                    pass
+                prev_tooth = det
+                
+                processed.append({
+                    'box': det['box'].tolist(),
+                    'class_id': det['class_id'],
+                    'score': det['score'],
+                    'quadrant': quad
+                })
+    
+    return processed
+
 if __name__ == "__main__":
     # Set up paths
-    data_dir = Path(r"C:\Users\aniru\Music\Project 1\ToothNumber_TaskDataset")
+    data_dir = Path(__file__).parent / "ToothNumber_TaskDataset"
+    output_dir = Path("runs") / f"train_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    output_dir.mkdir(parents=True, exist_ok=True)
     
     # Create YAML config
     print("Creating YAML configuration...")

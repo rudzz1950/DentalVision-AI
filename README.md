@@ -1,3 +1,26 @@
+## 🌐 FastAPI Inference Service
+
+Serve the detector as an API with consistent (anatomically postprocessed) outputs and FDI mapping:
+
+```bash
+uvicorn serve:app --host 0.0.0.0 --port 8000
+```
+
+Endpoints:
+- `GET /health` – health check
+- `POST /predict` – single image (multipart/form-data)
+- `POST /predict-batch` – multiple images (multipart/form-data)
+
+Form fields (optional): `conf`, `iou`, `tta`, `soft_nms`, `soft_nms_method`, `soft_nms_sigma`.
+
+Example curl:
+```bash
+curl -X POST "http://localhost:8000/predict" \
+  -F "file=@path/to/image.jpg" \
+  -F "conf=0.35" -F "iou=0.5" -F "soft_nms=true"
+```
+
+The API always applies anatomical postprocessing before returning the JSON response.
 
 # 🦷 Dental Teeth Detection with YOLOv8
 
@@ -132,7 +155,14 @@ python train_detection_model.py \
 
 ### 3. Run Inference
 
-Perform inference on new dental images (now supports FDI mapping via dataset YAML and optional TTA):
+Perform inference on new dental images.
+
+Notes:
+- FDI mapping is applied to plotted labels when you pass your dataset YAML (`--data-yaml`). Saved images show FDI codes (11–48).
+- Anatomical postprocessing (quadrant sorting and out-of-order filtering) is ENABLED by default in the CLI. Saved images and printed detections reflect consistent numbering.
+- A quadrant overlay (Q1–Q4) is drawn on saved images for visual clarity.
+- You can optionally enable WBF or Soft-NMS for better duplicate suppression.
+
 ```bash
 # Single image inference
 python inference.py \
@@ -143,23 +173,30 @@ python inference.py \
     --save-txt \
     --save-conf \
     --data-yaml ToothNumber_TaskDataset/dental_teeth.yaml \
-    --tta
+    --wbf  # or use --soft-nms
 
 # Batch inference on directory
 python inference.py \
     --model runs/train/exp/weights/best.pt \
     --source test_images/ \
     --output results/ \
-    --data-yaml ToothNumber_TaskDataset/dental_teeth.yaml
+    --data-yaml ToothNumber_TaskDataset/dental_teeth.yaml \
+    --soft-nms
 ```
 
 **Inference Options**:
-- `--weights`: Path to trained model weights
+- `--model`: Path to trained model weights
 - `--source`: Input source (image/directory/URL)
 - `--output`: Output directory for results
 - `--conf`: Confidence threshold (0-1)
 - `--save-txt`: Save results to .txt files
 - `--save-conf`: Save confidence scores in results
+- `--data-yaml`: Dataset YAML to set plotted label names to FDI codes (11–48)
+- `--wbf`, `--wbf-iou`, `--wbf-skip-thr`: Weighted Boxes Fusion (overrides Soft-NMS if both set)
+- `--soft-nms`, `--soft-nms-method`, `--soft-nms-sigma`: Soft-NMS parameters
+- `--tta`: Test-time augmentation (optional)
+
+Anatomical postprocessing is always applied in the CLI path; no flag is required.
 
 ### 4. Model Evaluation
 
@@ -235,6 +272,14 @@ Evaluate the trained model on the test set:
 ```bash
 python train_detection_model.py --task test --weights runs/train/exp/weights/best.pt
 ```
+
+After training in `train_detection_model.py`, additional evaluation artifacts are created under `runs/<...>/evaluation/`:
+- `metrics_val.json`, `metrics_test.json`: summary metrics (mAP, precision, recall, F1, and per-class AP if available)
+- `confusion_matrix_val.png`, `confusion_matrix_test.png`: confusion matrices
+- `reliability_val.png`, `reliability_test.png`: reliability diagrams with ECE
+- `calibration_val.json`, `calibration_test.json`: calibration details
+- `fp_heatmap_val.png`, `fn_heatmap_val.png` plus test variants: false positive/negative heatmaps across image space
+- `report.html`: an aggregated HTML report linking all of the above
 
 ## 🏗️ Model Architecture
 

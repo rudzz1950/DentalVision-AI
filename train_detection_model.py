@@ -165,7 +165,7 @@ def evaluate_model(model, data_yaml: str, output_dir: Path, split: str = 'val') 
         'timestamp': datetime.now().isoformat()
     }
     
-    with open(eval_dir / 'metrics.json', 'w') as f:
+    with open(eval_dir / f'metrics_{split}.json', 'w') as f:
         json.dump(metrics, f, indent=2)
     
     # Per-class AP (if available)
@@ -197,10 +197,10 @@ def evaluate_model(model, data_yaml: str, output_dir: Path, split: str = 'val') 
         plt.figure(figsize=(15, 12))
         plt.imshow(conf_mat, cmap='Blues')
         plt.colorbar()
-        plt.title('Confusion Matrix')
+        plt.title(f'Confusion Matrix ({split})')
         plt.xlabel('Predicted')
         plt.ylabel('Actual')
-        plt.savefig(eval_dir / 'confusion_matrix.png')
+        plt.savefig(eval_dir / f'confusion_matrix_{split}.png')
         plt.close()
 
     # Reliability diagram (calibration curve) if confidences and correctness are available
@@ -223,11 +223,240 @@ def evaluate_model(model, data_yaml: str, output_dir: Path, split: str = 'val') 
 
     return metrics
 
+def _generate_html_report(output_dir: Path) -> None:
+    """Generate a simple HTML report aggregating metrics, calibration, and heatmaps."""
+    eval_dir = output_dir / 'evaluation'
+    eval_dir.mkdir(exist_ok=True)
+    # Load metrics if present
+    def _load_json(p: Path):
+        try:
+            with open(p, 'r') as f:
+                return json.load(f)
+        except Exception:
+            return None
+    m_val = _load_json(eval_dir / 'metrics_val.json')
+    m_test = _load_json(eval_dir / 'metrics_test.json')
+    calib_val = _load_json(eval_dir / 'calibration_val.json')
+    calib_test = _load_json(eval_dir / 'calibration_test.json')
+
+    html = []
+    html.append('<!DOCTYPE html>')
+    html.append('<html><head><meta charset="utf-8"><title>DentalVision-AI Report</title>')
+    html.append('<style>body{font-family:Arial, sans-serif; margin:24px;} h2{margin-top:28px;} table{border-collapse:collapse;} td,th{border:1px solid #ccc;padding:6px 10px;} img{max-width:100%;height:auto;border:1px solid #ddd;padding:2px;margin:6px 0;}</style>')
+    html.append('</head><body>')
+    html.append('<h1>DentalVision-AI Training & Evaluation Report</h1>')
+
+    def _metrics_section(title: str, m: dict, split: str):
+        if not m:
+            return ''
+        s = [f'<h2>{title}</h2>']
+        s.append('<table><tbody>')
+        for k in ['mAP50', 'mAP50_95', 'precision', 'recall', 'f1_score']:
+            if k in m:
+                s.append(f'<tr><th>{k}</th><td>{m[k]:.4f}</td></tr>')
+        s.append('</tbody></table>')
+        # Confusion matrix
+        s.append(f'<h3>Confusion Matrix ({split})</h3>')
+        s.append(f'<img src="confusion_matrix_{split}.png" alt="Confusion Matrix {split}">')
+        # Calibration
+        s.append(f'<h3>Calibration & Reliability ({split})</h3>')
+        s.append(f'<img src="reliability_{split}.png" alt="Reliability {split}">')
+        # Heatmaps
+        s.append(f'<h3>Error Heatmaps ({split})</h3>')
+        s.append(f'<div><img src="fp_heatmap_{split}.png" alt="FP Heatmap {split}">')
+        s.append(f'<img src="fn_heatmap_{split}.png" alt="FN Heatmap {split}"></div>')
+        # Per-class AP
+        pc = m.get('per_class_ap') if isinstance(m, dict) else None
+        if pc:
+            s.append('<h3>Per-Class AP (0.5:0.95)</h3><table><tr><th>Class ID</th><th>Name</th><th>AP</th></tr>')
+            for cid, info in pc.items():
+                name = info.get('name', cid)
+                ap = info.get('ap50_95', 0.0)
+                s.append(f'<tr><td>{cid}</td><td>{name}</td><td>{ap:.4f}</td></tr>')
+            s.append('</table>')
+        return '\n'.join(s)
+
+    html.append(_metrics_section('Validation Metrics', m_val, 'val'))
+    html.append(_metrics_section('Test Metrics', m_test, 'test'))
+    html.append('<p>Report generated automatically.</p>')
+    html.append('</body></html>')
+
+    with open(eval_dir / 'report.html', 'w', encoding='utf-8') as f:
+        f.write('\n'.join(html))
+
 def export_model(model, format='onnx'):
     """Export the model to different formats."""
     export_path = model.export(format=format)
     print(f"Model exported to {export_path}")
     return export_path
+
+def _xywhn_to_xyxyn(box: np.ndarray) -> np.ndarray:
+    x, y, w, h = box
+    return np.array([x - w/2, y - h/2, x + w/2, y + h/2], dtype=np.float32)
+
+def _iou_xyxyn(a: np.ndarray, b: np.ndarray) -> float:
+    x1 = max(a[0], b[0])
+    y1 = max(a[1], b[1])
+    x2 = min(a[2], b[2])
+    y2 = min(a[3], b[3])
+    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    area_a = max(0.0, a[2] - a[0]) * max(0.0, a[3] - a[1])
+    area_b = max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+    union = area_a + area_b - inter + 1e-9
+    return float(inter / union)
+
+def compute_calibration_and_heatmaps(model, data_yaml: str, split: str, output_dir: Path,
+                                     iou_thr: float = 0.5, bins: int = 15, grid: int = 32) -> None:
+    """
+    Compute reliability diagram, Expected Calibration Error (ECE), and error heatmaps for a dataset split.
+    Saves plots under output_dir / 'evaluation'.
+    """
+    with open(data_yaml, 'r') as f:
+        cfg = yaml.safe_load(f)
+    base = Path(cfg['path']) if 'path' in cfg else Path(data_yaml).parent
+    img_dir = base / cfg[split]  # e.g., 'val/images'
+    if not img_dir.is_absolute():
+        img_dir = base / cfg[split]
+    # Deduce labels dir
+    labels_dir = img_dir.parent / 'labels'
+
+    # Gather files
+    image_files = sorted([p for p in Path(img_dir).glob('*') if p.suffix.lower() in {'.jpg', '.jpeg', '.png', '.bmp'}])
+    if not image_files:
+        print(f"No images found for split {split} at {img_dir}")
+        return
+
+    # Accumulators for calibration
+    confs_all: List[float] = []
+    correct_all: List[int] = []
+
+    # Heatmaps: FP and FN counts on a grid
+    fp_grid = np.zeros((grid, grid), dtype=np.float32)
+    fn_grid = np.zeros((grid, grid), dtype=np.float32)
+
+    for img_path in image_files:
+        # Load GT labels
+        lab_path = labels_dir / (img_path.stem + '.txt')
+        gt_classes = []
+        gt_boxes_xyxyn = []
+        if lab_path.exists():
+            with open(lab_path, 'r') as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) >= 5:
+                        cid = int(float(parts[0]))
+                        x, y, w, h = map(float, parts[1:5])
+                        gt_classes.append(cid)
+                        gt_boxes_xyxyn.append(_xywhn_to_xyxyn(np.array([x, y, w, h], dtype=np.float32)))
+        gt_boxes_xyxyn = np.array(gt_boxes_xyxyn, dtype=np.float32) if gt_boxes_xyxyn else np.zeros((0, 4), dtype=np.float32)
+        gt_classes = np.array(gt_classes, dtype=np.int32) if gt_classes else np.zeros((0,), dtype=np.int32)
+
+        # Predict
+        pred = model(img_path, conf=0.001, iou=0.7, verbose=False)[0]
+        if len(pred.boxes) == 0:
+            # All GT become FN
+            for g in gt_boxes_xyxyn:
+                # center cell
+                cx = (g[0] + g[2]) / 2
+                cy = (g[1] + g[3]) / 2
+                gx = min(grid - 1, max(0, int(cx * grid)))
+                gy = min(grid - 1, max(0, int(cy * grid)))
+                fn_grid[gy, gx] += 1
+            continue
+
+        p_cls = pred.boxes.cls.cpu().numpy().astype(np.int32)
+        p_conf = pred.boxes.conf.cpu().numpy().astype(np.float32)
+        # Convert to xyxyn normalized
+        xyxyn = pred.boxes.xyxyn.cpu().numpy().astype(np.float32)
+
+        # Match predictions to GT by IoU and class
+        used_gt = np.zeros((len(gt_boxes_xyxyn),), dtype=bool)
+        for i, (pc, pcfg, pb) in enumerate(zip(p_cls, p_conf, xyxyn)):
+            best_iou = 0.0
+            best_j = -1
+            for j, (gc, gb) in enumerate(zip(gt_classes, gt_boxes_xyxyn)):
+                if used_gt[j] or gc != pc:
+                    continue
+                iou = _iou_xyxyn(pb, gb)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_j = j
+            is_tp = best_iou >= iou_thr and best_j >= 0
+            confs_all.append(float(pcfg))
+            correct_all.append(1 if is_tp else 0)
+            if is_tp:
+                used_gt[best_j] = True
+            else:
+                # FP contributes to heatmap
+                cx = (pb[0] + pb[2]) / 2
+                cy = (pb[1] + pb[3]) / 2
+                gx = min(grid - 1, max(0, int(cx * grid)))
+                gy = min(grid - 1, max(0, int(cy * grid)))
+                fp_grid[gy, gx] += 1
+
+        # Unmatched GTs are FN
+        for j, used in enumerate(used_gt):
+            if not used:
+                gb = gt_boxes_xyxyn[j]
+                cx = (gb[0] + gb[2]) / 2
+                cy = (gb[1] + gb[3]) / 2
+                gx = min(grid - 1, max(0, int(cx * grid)))
+                gy = min(grid - 1, max(0, int(cy * grid)))
+                fn_grid[gy, gx] += 1
+
+    # Reliability diagram & ECE
+    if confs_all:
+        confs = np.array(confs_all, dtype=np.float32)
+        correct = np.array(correct_all, dtype=np.int32)
+        # Bin by confidence
+        bin_edges = np.linspace(0.0, 1.0, bins + 1)
+        bin_ids = np.clip(np.digitize(confs, bin_edges) - 1, 0, bins - 1)
+        accs = []
+        conf_means = []
+        counts = []
+        ece = 0.0
+        for b in range(bins):
+            mask = bin_ids == b
+            n = int(mask.sum())
+            counts.append(n)
+            if n > 0:
+                acc = float(correct[mask].mean())
+                cm = float(confs[mask].mean())
+            else:
+                acc, cm = 0.0, (bin_edges[b] + bin_edges[b+1]) / 2
+            accs.append(acc)
+            conf_means.append(cm)
+            ece += (n / max(1, len(confs))) * abs(acc - cm)
+
+        # Plot reliability diagram
+        plt.figure(figsize=(6, 6))
+        plt.plot([0, 1], [0, 1], 'k--', label='Perfectly Calibrated')
+        plt.plot(conf_means, accs, marker='o', label='Model')
+        plt.xlabel('Confidence')
+        plt.ylabel('Accuracy')
+        plt.title(f'Reliability Diagram ({split})\nECE={ece:.3f}')
+        plt.legend()
+        (output_dir / 'evaluation').mkdir(exist_ok=True)
+        plt.savefig(output_dir / 'evaluation' / f'reliability_{split}.png', dpi=200, bbox_inches='tight')
+        plt.close()
+
+        with open(output_dir / 'evaluation' / f'calibration_{split}.json', 'w') as f:
+            json.dump({'ece': ece, 'bins': bins, 'conf_means': conf_means, 'acc': accs, 'counts': counts}, f, indent=2)
+
+    # Heatmaps
+    def _save_heatmap(arr: np.ndarray, title: str, filename: str):
+        plt.figure(figsize=(6, 5))
+        plt.imshow(arr, cmap='hot', interpolation='nearest')
+        plt.colorbar(label='Count')
+        plt.title(title)
+        plt.xlabel('X (grid)')
+        plt.ylabel('Y (grid)')
+        plt.savefig(output_dir / 'evaluation' / filename, dpi=200, bbox_inches='tight')
+        plt.close()
+
+    (output_dir / 'evaluation').mkdir(exist_ok=True)
+    _save_heatmap(fp_grid, f'False Positives Heatmap ({split})', f'fp_heatmap_{split}.png')
+    _save_heatmap(fn_grid, f'False Negatives Heatmap ({split})', f'fn_heatmap_{split}.png')
 
 def plot_training_metrics(metrics: dict, output_dir: Path) -> None:
     """Plot training metrics over epochs."""
@@ -376,9 +605,19 @@ if __name__ == "__main__":
     print("\nEvaluating on test set...")
     test_metrics = evaluate_model(model, yaml_path, split='test')
     print("\nTest metrics:", test_metrics)
+
+    # Calibration & Heatmaps for val and test
+    print("\nComputing calibration and heatmaps (val)...")
+    compute_calibration_and_heatmaps(model, str(yaml_path), split='val', output_dir=output_dir)
+    print("Computing calibration and heatmaps (test)...")
+    compute_calibration_and_heatmaps(model, str(yaml_path), split='test', output_dir=output_dir)
     
     # Export model to ONNX format
     print("\nExporting model to ONNX format...")
     export_path = export_model(model, format='onnx')
+    
+    # Generate HTML report aggregating metrics and plots
+    print("\nGenerating HTML report...")
+    _generate_html_report(output_dir)
     
     print("\nTraining and evaluation complete!")

@@ -29,6 +29,12 @@ class ToothDetector:
         self.model = YOLO(model_path)
         # Prefer FDI mapping from dataset YAML if provided, else fallback to computed mapping
         self.class_to_fdi = self._load_fdi_mapping(data_yaml_path)
+        # Set model's class names to FDI strings for plotting
+        try:
+            fdi_names = {i: str(self.class_to_fdi.get(i, i)) for i in range(len(self.model.names))}
+            self.model.names = fdi_names
+        except Exception:
+            pass
 
     @staticmethod
     def _compute_fdi_mapping(num_classes: int = 32) -> dict:
@@ -295,6 +301,21 @@ class ToothDetector:
             print(f"Saved detection result to {output_path}")
             
         return img_with_dets
+
+    @staticmethod
+    def draw_quadrant_overlay(img: np.ndarray, color=(255, 0, 0), thickness=2) -> np.ndarray:
+        """Draw simple quadrant overlays (vertical and horizontal midlines) and labels on an RGB image."""
+        h, w = img.shape[:2]
+        cx, cy = w // 2, h // 2
+        # Lines
+        cv2.line(img, (cx, 0), (cx, h), color, thickness)
+        cv2.line(img, (0, cy), (w, cy), color, thickness)
+        # Labels
+        cv2.putText(img, 'Q1', (int(0.05 * w), int(0.1 * h)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+        cv2.putText(img, 'Q2', (int(0.85 * w), int(0.1 * h)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+        cv2.putText(img, 'Q3', (int(0.85 * w), int(0.95 * h)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+        cv2.putText(img, 'Q4', (int(0.05 * w), int(0.95 * h)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+        return img
     
     def process_directory(self, input_dir, output_dir, conf_threshold=0.5, iou_threshold=0.5, tta: bool = False,
                           soft_nms: bool = False, soft_nms_method: str = 'gaussian', soft_nms_sigma: float = 0.5):
@@ -367,8 +388,7 @@ def main():
     parser.add_argument('--wbf', action='store_true', help='Enable Weighted Boxes Fusion (overrides Soft-NMS if both set)')
     parser.add_argument('--wbf-iou', type=float, default=0.55, help='WBF IoU threshold')
     parser.add_argument('--wbf-skip-thr', type=float, default=0.001, help='WBF skip box threshold')
-    # Anatomical postprocessing summary
-    parser.add_argument('--anatomical-post', action='store_true', help='Print anatomical postprocessing summary (quadrant ordering)')
+    # Anatomical postprocessing is now enabled by default (no flag)
     args = parser.parse_args()
     
     # Initialize the detector
@@ -394,11 +414,11 @@ def main():
                 detector.apply_soft_nms(detections, iou_thresh=args.iou, sigma=args.soft_nms_sigma,
                                         method=args.soft_nms_method, conf_filter=args.conf)
             
-            # Optional anatomical postprocessing apply + summary
-            if args.anatomical_post and _anatomical_post is not None and len(detections.boxes) > 0:
+            # Always apply anatomical postprocessing if available
+            if _anatomical_post is not None and len(detections.boxes) > 0:
                 try:
                     detector.apply_anatomical_post(detections)
-                    # Summary print
+                    # Optional summary print
                     processed = _anatomical_post([detections])
                     if processed:
                         print("\nAnatomical ordering summary (FDI, quadrant, conf):")
@@ -407,6 +427,10 @@ def main():
                 except Exception:
                     pass
 
+            # Regenerate plotted image after postprocessing and overlay quadrants
+            img_with_dets = detections.plot()
+            img_with_dets = detector.draw_quadrant_overlay(img_with_dets)
+            
             # Save the result
             output_path = output_dir / f"det_{source_path.name}"
             cv2.imwrite(str(output_path), cv2.cvtColor(img_with_dets, cv2.COLOR_RGB2BGR))

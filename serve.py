@@ -83,6 +83,12 @@ async def predict(
     if soft_nms and len(det.boxes) > 0:
         detector.apply_soft_nms(det, iou_thresh=iou, sigma=soft_nms_sigma,
                                 method=soft_nms_method, conf_filter=conf)
+    # Always apply anatomical postprocessing for consistent numbering if available
+    if len(det.boxes) > 0:
+        try:
+            detector.apply_anatomical_post(det)
+        except Exception:
+            pass
 
     detections: List[Detection] = []
     if len(det.boxes) > 0:
@@ -133,6 +139,11 @@ async def predict_batch(
         if soft_nms and len(det.boxes) > 0:
             detector.apply_soft_nms(det, iou_thresh=iou, sigma=soft_nms_sigma,
                                     method=soft_nms_method, conf_filter=conf)
+        if len(det.boxes) > 0:
+            try:
+                detector.apply_anatomical_post(det)
+            except Exception:
+                pass
         detections = []
         if len(det.boxes) > 0:
             xyxyn = det.boxes.xyxyn.cpu().numpy()

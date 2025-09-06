@@ -85,9 +85,8 @@ def train_yolov8(data_yaml, epochs=200, imgsz=640, batch=16, model_size='m', pat
         'lrf': lrf,
         'optimizer': optimizer,
         'device': '0' if torch.cuda.is_available() else 'cpu',
-        'workers': min(8, os.cpu_count() - 1),  # Use all available cores - 1
-        'weight_decay': 0.0005,  # L2 regularization
-        'cos_lr': True,  # Cosine learning rate scheduler
+        'workers': min(8, os.cpu_count() - 1),
+        'weight_decay': 0.0005,
         'label_smoothing': 0.1,  # Label smoothing
         
         # Image augmentation parameters
@@ -107,28 +106,6 @@ def train_yolov8(data_yaml, epochs=200, imgsz=640, batch=16, model_size='m', pat
         'erasing': 0.4,   # Random erasing (probability)
         'augment': True,  # Apply image augmentation
         
-        # Advanced augmentation for dental images
-        'mosaic9': 0.2,   # 9-image mosaic augmentation
-        'auto_augment': 'randaugment',  # AutoAugment policy
-        'augment_degrees': 10.0,  # Additional rotation for augmentation
-        'augment_translate': 0.1,
-        'augment_scale': 0.5,
-        'augment_shear': 2.0,
-        'augment_perspective': 0.0005,
-        'augment_flipud': 0.5,
-        'augment_fliplr': 0.5,
-        'augment_mosaic': 1.0,
-        'augment_mixup': 0.1,
-        'augment_copy_paste': 0.1,
-        'augment_erasing': 0.4,
-        
-        # Regularization
-        'dropout': 0.1,  # Dropout (fraction)
-        'weight_decay': 0.0005,  # L2 regularization
-        'warmup_epochs': 3.0,  # Warmup epochs (fractions ok)
-        'warmup_momentum': 0.8,  # Warmup initial momentum
-        'warmup_bias_lr': 0.1,  # Warmup initial bias lr
-        
         # Training settings
         'rect': False,  # Rectangular training
         'single_cls': False,  # Train as single-class dataset
@@ -136,11 +113,8 @@ def train_yolov8(data_yaml, epochs=200, imgsz=640, batch=16, model_size='m', pat
         'project': 'runs/train',  # Save to project/name
         'name': 'exp',  # Save results to project/name
         'save_period': -1,  # Save checkpoint every x epochs
-        'local_rank': -1,  # DDP parameter, do not modify
         'freeze': None,  # Freeze layers (comma separated)
-        'save_dir': 'runs/train/exp',  # Save results to project/name
         'plots': True,  # Save plots during training
-        'optimize': True,  # Optimize ONNX and TorchScript models
         'seed': 42,  # Global training seed
     }
     
@@ -194,6 +168,29 @@ def evaluate_model(model, data_yaml: str, output_dir: Path, split: str = 'val') 
     with open(eval_dir / 'metrics.json', 'w') as f:
         json.dump(metrics, f, indent=2)
     
+    # Per-class AP (if available)
+    try:
+        per_class_ap = {}
+        if hasattr(results.box, 'maps') and results.box.maps is not None:
+            maps = results.box.maps  # array of per-class AP@0.5:0.95
+            # get class names
+            class_names = None
+            if hasattr(model, 'names'):
+                class_names = model.names
+            elif isinstance(data_yaml, (str, Path)) and Path(data_yaml).exists():
+                with open(data_yaml, 'r') as f:
+                    y = yaml.safe_load(f)
+                    class_names = y.get('names')
+            if isinstance(class_names, dict):
+                for i, ap in enumerate(maps):
+                    per_class_ap[str(i)] = {'name': class_names.get(i, str(i)), 'ap50_95': float(ap)}
+            else:
+                for i, ap in enumerate(maps):
+                    per_class_ap[str(i)] = {'name': str(i), 'ap50_95': float(ap)}
+        metrics['per_class_ap'] = per_class_ap
+    except Exception:
+        pass
+
     # Generate confusion matrix
     if hasattr(results, 'confusion_matrix'):
         conf_mat = results.confusion_matrix.matrix
@@ -205,7 +202,25 @@ def evaluate_model(model, data_yaml: str, output_dir: Path, split: str = 'val') 
         plt.ylabel('Actual')
         plt.savefig(eval_dir / 'confusion_matrix.png')
         plt.close()
-    
+
+    # Reliability diagram (calibration curve) if confidences and correctness are available
+    try:
+        # Attempt to access per-detection correctness if provided
+        # Fallback: skip if not available
+        if hasattr(results, 'boxes') and results.boxes is not None:
+            confs = []
+            correct = []
+            for r in results:
+                if hasattr(r, 'boxes') and r.boxes is not None and len(r.boxes) > 0:
+                    c = r.boxes.conf.cpu().numpy()
+                    confs.append(c)
+                    # Without GT match info, approximate correctness by thresholding; skip to avoid misleading plot
+            # Skip due to lack of GT match flags; real calibration requires TP flags from matching.
+        else:
+            pass
+    except Exception:
+        pass
+
     return metrics
 
 def export_model(model, format='onnx'):
@@ -260,52 +275,71 @@ def postprocess_predictions(predictions, image_size: Tuple[int, int] = (640, 640
     Returns:
         List of processed detections with anatomical validation
     """
-    processed = []
-    
+    processed: List[Dict] = []
+
+    # Helper: class_id -> FDI number
+    fdi_map = {i: int(f"{(i // 8) + 1}{(i % 8) + 1}") for i in range(32)}
+
     for pred in predictions:
         # Convert to numpy for easier manipulation
         boxes = pred.boxes.xywhn.cpu().numpy()  # Normalized xywh
         classes = pred.boxes.cls.cpu().numpy()
         scores = pred.boxes.conf.cpu().numpy()
-        
+
         # Group by quadrant (1-4)
-        quadrants = {1: [], 2: [], 3: [], 4: []}
+        quadrants: Dict[int, List[Dict]] = {1: [], 2: [], 3: [], 4: []}
         for i, (box, cls_id, score) in enumerate(zip(boxes, classes, scores)):
             x_center, y_center, width, height = box
-            quadrant = int(cls_id // 8) + 1  # 1-4
+            cls_id = int(cls_id)
+            quadrant = int(cls_id // 8) + 1  # 1..4
             quadrants[quadrant].append({
                 'box': box,
-                'class_id': int(cls_id),
+                'class_id': cls_id,
+                'fdi': fdi_map.get(cls_id, cls_id),
                 'score': float(score),
-                'x_center': x_center,
-                'y_center': y_center
+                'x_center': float(x_center),
+                'y_center': float(y_center)
             })
-        
-        # Sort teeth within each quadrant
-        for quad, detections in quadrants.items():
-            # Sort by x-coordinate (left to right)
-            if quad in [1, 2]:  # Upper jaw
-                detections.sort(key=lambda x: x['x_center'])
-            else:  # Lower jaw
-                detections.sort(key=lambda x: -x['x_center'])
-            
-            # Validate tooth sequence
-            prev_tooth = None
-            for det in detections:
-                # Add anatomical validation logic here
-                # For example, check if tooth sequence makes sense
-                if prev_tooth:
-                    # Check if teeth are in correct order
-                    pass
-                prev_tooth = det
-                
+
+        # Sort and validate sequences within each quadrant
+        for quad, dets in quadrants.items():
+            if not dets:
+                continue
+
+            # Expected tooth index order within a quadrant is 1..8
+            expected_ids = list(range((quad - 1) * 8, quad * 8))
+
+            # Sort by x direction: upper jaw (q1,q2) left->right; lower jaw (q3,q4) right->left
+            if quad in (1, 2):
+                dets.sort(key=lambda x: x['x_center'])
+            else:
+                dets.sort(key=lambda x: -x['x_center'])
+
+            # Enforce monotonic progression by majority voting on local ordering
+            # If a detection is out-of-order relative to neighbors, mark it as questionable
+            sequence_flags: List[bool] = [True] * len(dets)
+            for i in range(1, len(dets)):
+                if dets[i]['class_id'] < dets[i - 1]['class_id']:
+                    # Out-of-order for the expected progression; flag the lower-confidence one
+                    if dets[i]['score'] < dets[i - 1]['score']:
+                        sequence_flags[i] = False
+                    else:
+                        sequence_flags[i - 1] = False
+
+            # Filter out flagged detections but keep at least 1
+            filtered = [d for d, ok in zip(dets, sequence_flags) if ok]
+            if not filtered:
+                filtered = [max(dets, key=lambda d: d['score'])]
+
+            for det in filtered:
                 processed.append({
                     'box': det['box'].tolist(),
                     'class_id': det['class_id'],
+                    'fdi': det['fdi'],
                     'score': det['score'],
                     'quadrant': quad
                 })
-    
+
     return processed
 
 if __name__ == "__main__":

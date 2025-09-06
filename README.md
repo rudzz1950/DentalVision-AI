@@ -30,7 +30,7 @@ This project implements a robust tooth detection and numbering system using YOLO
 ├── dental_teeth_detection/    # Model checkpoints and configurations
 │   ├── yolov8m_optimized/     # Optimized model weights
 │   └── yolov8m_train/         # Training configurations
-├── analyze_dental_dataset.py  # Dataset analysis and visualization
+├── analyze_dataset.py         # Dataset analysis and visualization
 ├── train_detection_model.py   # Model training script
 ├── inference.py              # Inference on new images
 └── model_agent.py            # Model serving and API
@@ -101,9 +101,7 @@ This project implements a robust tooth detection and numbering system using YOLO
 
 Analyze the dataset to understand class distribution and visualize annotations:
 ```bash
-python analyze_dental_dataset.py \
-    --data-dir ToothNumber_TaskDataset/ \
-    --output-dir analysis_results/
+python analyze_dataset.py
 ```
 
 **Outputs**:
@@ -134,22 +132,25 @@ python train_detection_model.py \
 
 ### 3. Run Inference
 
-Perform inference on new dental images:
+Perform inference on new dental images (now supports FDI mapping via dataset YAML and optional TTA):
 ```bash
 # Single image inference
 python inference.py \
-    --weights runs/detect/train/weights/best.pt \
+    --model runs/train/exp/weights/best.pt \
     --source test_image.jpg \
     --output results/ \
     --conf 0.25 \
     --save-txt \
-    --save-conf
+    --save-conf \
+    --data-yaml ToothNumber_TaskDataset/dental_teeth.yaml \
+    --tta
 
 # Batch inference on directory
 python inference.py \
-    --weights runs/detect/train/weights/best.pt \
+    --model runs/train/exp/weights/best.pt \
     --source test_images/ \
-    --output results/
+    --output results/ \
+    --data-yaml ToothNumber_TaskDataset/dental_teeth.yaml
 ```
 
 **Inference Options**:

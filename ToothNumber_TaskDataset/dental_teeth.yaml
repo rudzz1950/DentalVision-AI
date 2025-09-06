@@ -1,46 +1,71 @@
-# FDI Tooth Numbering System
-# First digit = Quadrant (1=upper right, 2=upper left, 3=lower left, 4=lower right)
-# Second digit = Tooth position within quadrant (1=central incisor → 8=third molar)
-
-names:
-  0: 'Canine (13)'
-  1: 'Canine (23)'
-  2: 'Canine (33)'
-  3: 'Canine (43)'
-  4: 'Central Incisor (21)'
-  5: 'Central Incisor (41)'
-  6: 'Central Incisor (31)'
-  7: 'Central Incisor (11)'
-  8: 'First Molar (16)'
-  9: 'First Molar (26)'
-  10: 'First Molar (36)'
-  11: 'First Molar (46)'
-  12: 'First Premolar (14)'
-  13: 'First Premolar (34)'
-  14: 'First Premolar (44)'
-  15: 'First Premolar (24)'
-  16: 'Lateral Incisor (22)'
-  17: 'Lateral Incisor (32)'
-  18: 'Lateral Incisor (42)'
-  19: 'Lateral Incisor (12)'
-  20: 'Second Molar (17)'
-  21: 'Second Molar (27)'
-  22: 'Second Molar (37)'
-  23: 'Second Molar (47)'
-  24: 'Second Premolar (15)'
-  25: 'Second Premolar (25)'
-  26: 'Second Premolar (35)'
-  27: 'Second Premolar (45)'
-  28: 'Third Molar (18)'
-  29: 'Third Molar (28)'
-  30: 'Third Molar (38)'
-  31: 'Third Molar (48)'
-
-# Number of classes
-nc: 32
-
-# Dataset paths (relative to this file)
-path: .
+path: C:\Users\aniru\Downloads\DentalVision-AI-main\DentalVision-AI-main\ToothNumber_TaskDataset
 train: train/images
 val: val/images
 test: test/images
+names:
+  0: Central Incisor (11)
+  1: Lateral Incisor (12)
+  2: Canine (13)
+  3: First Premolar (14)
+  4: Second Premolar (15)
+  5: First Molar (16)
+  6: Second Molar (17)
+  7: Third Molar (18)
+  8: Central Incisor (21)
+  9: Lateral Incisor (22)
+  10: Canine (23)
+  11: First Premolar (24)
+  12: Second Premolar (25)
+  13: First Molar (26)
+  14: Second Molar (27)
+  15: Third Molar (28)
+  16: Central Incisor (31)
+  17: Lateral Incisor (32)
+  18: Canine (33)
+  19: First Premolar (34)
+  20: Second Premolar (35)
+  21: First Molar (36)
+  22: Second Molar (37)
+  23: Third Molar (38)
+  24: Central Incisor (41)
+  25: Lateral Incisor (42)
+  26: Canine (43)
+  27: First Premolar (44)
+  28: Second Premolar (45)
+  29: First Molar (46)
+  30: Second Molar (47)
+  31: Third Molar (48)
+nc: 32
+fdi_mapping:
+  0: 11
+  1: 12
+  2: 13
+  3: 14
+  4: 15
+  5: 16
+  6: 17
+  7: 18
+  8: 21
+  9: 22
+  10: 23
+  11: 24
+  12: 25
+  13: 26
+  14: 27
+  15: 28
+  16: 31
+  17: 32
+  18: 33
+  19: 34
+  20: 35
+  21: 36
+  22: 37
+  23: 38
+  24: 41
+  25: 42
+  26: 43
+  27: 44
+  28: 45
+  29: 46
+  30: 47
+  31: 48
